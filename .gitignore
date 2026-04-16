@@ -5,6 +5,9 @@ app/build/
 
 # Local
 local.properties
+keystore.properties
+# 签名私钥勿提交
+keystore/twotap.jks
 
 # IDE
 .idea/

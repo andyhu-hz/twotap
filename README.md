@@ -57,6 +57,24 @@
 
 需要 **JDK 17** 与 **Android SDK**（与 `compileSdk` 一致）。
 
+### Release 签名（打正式包前）
+
+1. 在项目根目录复制 **`keystore.properties.example`** 为 **`keystore.properties`**（该文件名已写入 `.gitignore`，**勿提交到 Git**）。
+2. 填写 `storeFile`（`.jks` 的绝对路径）、`storePassword`、`keyAlias`、`keyPassword`。
+3. 若没有 keystore，可在项目根执行（口令与别名请与 `keystore.properties` 一致；**私钥文件 `keystore/twotap.jks` 已加入 .gitignore**）：
+
+```bash
+mkdir -p keystore
+keytool -genkeypair -v -storetype JKS -keystore keystore/twotap.jks -alias twotap \
+  -keyalg RSA -keysize 2048 -validity 10000 \
+  -storepass 你的仓库口令 -keypass 你的密钥口令 \
+  -dname "CN=TwoTap, OU=App, O=Twotap, L=, ST=, C=US"
+```
+
+4. 确认 `storeFile` 指向的 `.jks` 在磁盘上存在后再执行 `assembleRelease`。
+
+若缺少 `keystore.properties`，`assembleRelease` 仍会构建，但**不会**使用上述正式签名（本机调试时可能用默认调试签名，具体以 Gradle/AGP 行为为准）。配置齐全后才会用 `signingConfigs.release` 签名。
+
 ```bash
 # 在项目根目录（若已配置 gradlew）
 ./gradlew :app:assembleRelease
