@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TwoTap</string>
+    <string name="service_label">TwoTap 双指触摸服务</string>
+    <string name="service_description">监听音量加减组合键，在屏幕左右两侧模拟双指触摸，并按需保持/释放右侧触点。</string>
+</resources>
