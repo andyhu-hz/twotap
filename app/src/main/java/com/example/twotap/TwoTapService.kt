@@ -22,6 +22,11 @@ import androidx.annotation.RequiresApi
  * - 阶段2 onCompleted 后 **handler.post** 启动 [continueRightHold]（避免在回调栈内直接 dispatch）
  * - 第二次双键：仅 [State.RELEASING]，由下一段 [continueRightHold] 派发抬起
  * - 组合键：1.2s 窗口 + 过期时间戳清理；释放后短冷却
+ *
+ * **续接被系统取消**：逻辑已回 [State.IDLE]，但 phase2 右指 `willContinue` 在部分 ROM 上仍会残留注入。
+ * 置 [consumeNextIdleComboAsLiftOnly]：之后**第一次**空闲双键只做补抬手（对齐「第二次双键=松手」）。
+ * 续接刚断时**不**自动派发补抬：自动 50ms 手势会立刻取消 phase2 后 `willContinue` 在部分 ROM 上仍有效的长按，
+ * 只剩极短触碰。仅用户主动再按一次双键时才 [forceLiftRightFinger]。
  */
 class TwoTapService : AccessibilityService() {
 
@@ -31,6 +36,7 @@ class TwoTapService : AccessibilityService() {
         private const val PHASE1_MS = 300L
         private const val PHASE2_MS = 300L
         private const val HOLD_SEGMENT_MS = 500L
+        private const val LIFT_MS = 50L
 
         private const val COMBO_WINDOW_MS = 1_200L
         private const val POST_RELEASE_COOLDOWN_MS = 250L
@@ -41,6 +47,9 @@ class TwoTapService : AccessibilityService() {
     @Volatile private var state = State.IDLE
     @Volatile private var phase3Active = false
     @Volatile private var gestureReady = true
+
+    /** 续接链刚断：下一次在 [State.IDLE] 收到的双键应视为「对齐/松手」，不发阶段1。 */
+    @Volatile private var consumeNextIdleComboAsLiftOnly = false
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -110,9 +119,19 @@ class TwoTapService : AccessibilityService() {
         when (state) {
             State.IDLE -> {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                    state = State.HOLDING
-                    Log.d(TAG, "▶ 开始 [IDLE→HOLDING]")
-                    handler.post { startPhase1() }
+                    if (consumeNextIdleComboAsLiftOnly) {
+                        Log.d(TAG, "▣ 消耗双键：仅补抬手（上次续接失败后的对齐，不当新开始）")
+                        handler.post {
+                            forceLiftRightFinger(
+                                reason = "user-idle-sync-after-broken",
+                                clearConsumeAfterSuccess = true
+                            )
+                        }
+                    } else {
+                        state = State.HOLDING
+                        Log.d(TAG, "▶ 开始 [IDLE→HOLDING]")
+                        handler.post { startPhase1() }
+                    }
                 }
             }
             State.HOLDING -> {
@@ -197,6 +216,51 @@ class TwoTapService : AccessibilityService() {
         if (!ok) { Log.e(TAG, "阶段2 dispatch 失败"); resetState() }
     }
 
+    /**
+     * 短点同坐标，取消可能残留的 willContinue 注入。
+     * @param clearConsumeAfterSuccess 为 true 且 onCompleted 时清除 [consumeNextIdleComboAsLiftOnly]
+     */
+    @RequiresApi(Build.VERSION_CODES.N)
+    private fun forceLiftRightFinger(
+        reason: String,
+        clearConsumeAfterSuccess: Boolean = false
+    ) {
+        ensureCoords()
+        Log.d(TAG, "补抬手 ($reason) clearConsume=$clearConsumeAfterSuccess")
+        val stroke = GestureDescription.StrokeDescription(
+            Path().apply { moveTo(rightX, cy) }, 0L, LIFT_MS
+        )
+        val ok = dispatchGesture(
+            GestureDescription.Builder().addStroke(stroke).build(),
+            object : GestureResultCallback() {
+                override fun onCompleted(g: GestureDescription) {
+                    if (clearConsumeAfterSuccess) consumeNextIdleComboAsLiftOnly = false
+                    Log.d(TAG, "补抬手完成")
+                    gestureReady = false
+                    handler.postDelayed({ gestureReady = true }, POST_RELEASE_COOLDOWN_MS)
+                }
+                override fun onCancelled(g: GestureDescription) {
+                    Log.w(TAG, "补抬手被取消（${if (clearConsumeAfterSuccess) "仍须再按一次双键对齐" else "可再试"}）")
+                }
+            },
+            handler
+        )
+        if (!ok) Log.w(TAG, "补抬手 dispatch 失败")
+    }
+
+    /**
+     * 续接段未跑起来：清逻辑状态，并标记「下次空闲双键 = 仅补抬」。
+     * 不在此处自动 [forceLiftRightFinger]：新手势会取消 OEM 上仍有效的 willContinue 长按，导致只剩 ~600ms 短触。
+     */
+    private fun onBrokenContinueChain() {
+        Log.w(TAG, "续接链断裂 → 逻辑 IDLE，下次空闲双键仅补抬（不自动补抬，避免截断残留长按）")
+        currentRightStroke = null
+        phase3Active = false
+        state = State.IDLE
+        gestureReady = true
+        consumeNextIdleComboAsLiftOnly = true
+    }
+
     @RequiresApi(Build.VERSION_CODES.O)
     private fun continueRightHold() {
         val prev = currentRightStroke
@@ -217,7 +281,7 @@ class TwoTapService : AccessibilityService() {
             prev.continueStroke(path, 0L, duration, willContinue)
         } catch (e: IllegalStateException) {
             Log.e(TAG, "continueStroke 失败", e)
-            resetState()
+            onBrokenContinueChain()
             return
         }
         currentRightStroke = next
@@ -228,12 +292,14 @@ class TwoTapService : AccessibilityService() {
                 override fun onCompleted(g: GestureDescription) {
                     if (isReleasing) {
                         Log.d(TAG, "抬起完成，冷却 ${POST_RELEASE_COOLDOWN_MS}ms")
+                        consumeNextIdleComboAsLiftOnly = false
                         gestureReady = false
                         phase3Active = false
                         currentRightStroke = null
                         state = State.IDLE
                         handler.postDelayed({ gestureReady = true }, POST_RELEASE_COOLDOWN_MS)
                     } else {
+                        consumeNextIdleComboAsLiftOnly = false
                         handler.post {
                             when (state) {
                                 State.HOLDING, State.RELEASING -> continueRightHold()
@@ -244,14 +310,14 @@ class TwoTapService : AccessibilityService() {
                 }
                 override fun onCancelled(g: GestureDescription) {
                     Log.w(TAG, "continue 段取消 isReleasing=$isReleasing")
-                    if (!isReleasing) resetState()
+                    if (!isReleasing) onBrokenContinueChain()
                 }
             },
             handler
         )
         if (!ok) {
             Log.e(TAG, "continue dispatch 失败")
-            resetState()
+            onBrokenContinueChain()
         }
     }
 
