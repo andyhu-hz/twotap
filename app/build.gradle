@@ -30,6 +30,15 @@ android {
     kotlinOptions {
         jvmTarget = '1.8'
     }
+
+    // Release: twotap.apk；Debug: twotap-debug.apk
+    applicationVariants.configureEach { variant ->
+        variant.outputs.configureEach { output ->
+            output.outputFileName = variant.buildType.name == "release"
+                    ? "twotap.apk"
+                    : "twotap-debug.apk"
+        }
+    }
 }
 
 dependencies {
